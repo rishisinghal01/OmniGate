@@ -1,0 +1,16 @@
+{
+  "name": "omnigate",
+  "private": true,
+  "workspaces": [
+    "gateway",
+    "dashboard"
+  ],
+  "scripts": {
+    "dev:gateway": "npm run dev -w gateway"
+  },
+  "dependencies": {
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1"
+  }
+}
