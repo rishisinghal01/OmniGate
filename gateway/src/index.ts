@@ -11,6 +11,11 @@ const port = 3000;
 app.use(cors());
 app.use(express.json());
 
+// Root endpoint for browser checks
+app.get('/', (req, res) => {
+  res.send('OmniGate API is running! 🚀 Send a POST request to /v1/chat/completions to interact.');
+});
+
 // Helper function for Mock (Free testing without keys!)
 async function callMock(body: any) {
   console.log("Routing to Mock...");
@@ -128,6 +133,16 @@ async function callGemini(body: any) {
   });
 
   const geminiData = await response.json();
+  
+  // Log the raw response so we can see what went wrong in the terminal
+  console.log("Gemini API Response:", JSON.stringify(geminiData, null, 2));
+
+  let content = "Error getting response";
+  if (geminiData.error) {
+    content = `API Error: ${geminiData.error.message}`;
+  } else if (geminiData.candidates?.[0]?.content?.parts?.[0]?.text) {
+    content = geminiData.candidates[0].content.parts[0].text;
+  }
 
   // 3. Translate Gemini's response to look exactly like OpenAI's
   return {
@@ -140,12 +155,68 @@ async function callGemini(body: any) {
         index: 0,
         message: {
           role: "assistant",
-          content: geminiData.candidates?.[0]?.content?.parts?.[0]?.text || "Error getting response"
+          content: content
         },
         finish_reason: "stop"
       }
     ]
   };
+}
+
+// Helper function to call OpenRouter
+async function callOpenRouter(body: any) {
+  const openRouterKey = process.env.OPENROUTER_API_KEY;
+  console.log("Routing to OpenRouter...");
+  
+  // OpenRouter uses the exact same format as OpenAI!
+  // We just need to change the URL and the API key header.
+  
+  // Optional: OpenRouter asks to remove the 'openrouter/' prefix from the model name 
+  // before sending the request, or we can just send it as is if OpenRouter expects it.
+  // Actually, OpenRouter expects the model name like 'google/gemini-2.5-flash', 
+  // so if the user passes 'openrouter/google/gemini-2.5-flash', we strip 'openrouter/'.
+  let targetModel = body.model;
+  if (targetModel.startsWith('openrouter/')) {
+    targetModel = targetModel.replace('openrouter/', '');
+  }
+  
+  const payload = { ...body, model: targetModel };
+
+  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${openRouterKey}`,
+      'HTTP-Referer': 'http://localhost:3000', // OpenRouter requires these headers for rankings
+      'X-Title': 'OmniGate'
+    },
+    body: JSON.stringify(payload)
+  });
+  
+  const openRouterData = await response.json();
+  
+  // Log if there is an error
+  if (openRouterData.error) {
+    console.log("OpenRouter API Error:", JSON.stringify(openRouterData, null, 2));
+    return {
+      id: "openrouter-error",
+      object: "chat.completion",
+      created: Math.floor(Date.now() / 1000),
+      model: body.model,
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: `OpenRouter API Error: ${openRouterData.error.message || 'Unknown error'}`
+          },
+          finish_reason: "stop"
+        }
+      ]
+    };
+  }
+  
+  return openRouterData;
 }
 
 // Our main endpoint
@@ -200,8 +271,11 @@ app.post('/v1/chat/completions', async (req, res) => {
     else if (model.startsWith('mock')) {
       result = await callMock(body);
     }
+    else if (model.startsWith('openrouter/')) {
+      result = await callOpenRouter(body);
+    }
     else {
-      return res.status(400).json({ error: "Unknown model. Try mock-test, gpt-4, claude-3-opus, or gemini-1.5-pro." });
+      return res.status(400).json({ error: "Unknown model. Try mock-test, openrouter/..., gpt-4, claude-3, or gemini-2.0-flash." });
     }
 
     // Send the result back to the user

@@ -10,8 +10,8 @@ redisClient.on('error', (err) => console.error('Redis Client Error', err));
 let isConnected = false;
 let indexCreated = false;
 
-const INDEX_NAME = 'idx:semantic_cache';
-const PREFIX = 'cache:';
+const INDEX_NAME = 'idx:semantic_cache_gemini';
+const PREFIX = 'cache_gemini:';
 
 export async function connectRedis() {
   if (!isConnected) {
@@ -34,7 +34,7 @@ async function createVectorIndex() {
   } catch (e: any) {
     if (e.message.toLowerCase().includes('unknown index name')) {
       console.log("Creating Redis vector index...");
-      // OpenAI text-embedding-3-small uses 1536 dimensions
+      // Gemini gemini-embedding-2 uses 768 dimensions
       try {
         await redisClient.ft.create(
           INDEX_NAME,
@@ -48,7 +48,7 @@ async function createVectorIndex() {
               type: SCHEMA_FIELD_TYPE.VECTOR,
               ALGORITHM: SCHEMA_VECTOR_FIELD_ALGORITHM.FLAT,
               TYPE: 'FLOAT32',
-              DIM: 1536,
+              DIM: 768,
               DISTANCE_METRIC: 'COSINE'
             }
           },
@@ -68,24 +68,26 @@ async function createVectorIndex() {
   }
 }
 
-// Generate Embeddings using OpenAI
+// Generate Embeddings using Gemini
 export async function getEmbedding(text: string): Promise<number[] | null> {
   try {
-    const openaiKey = process.env.OPENAI_API_KEY;
-    if (!openaiKey) {
-      console.warn("OPENAI_API_KEY not found. Semantic caching is disabled.");
+    const geminiKey = process.env.GEMINI_API_KEY;
+    if (!geminiKey) {
+      console.warn("GEMINI_API_KEY not found. Semantic caching is disabled.");
       return null;
     }
 
-    const res = await fetch('https://api.openai.com/v1/embeddings', {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-2:embedContent?key=${geminiKey}`;
+    const res = await fetch(url, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${openaiKey}`
+        'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        input: text,
-        model: 'text-embedding-3-small'
+        model: 'models/gemini-embedding-2',
+        content: {
+          parts: [{ text: text }]
+        }
       })
     });
 
@@ -95,7 +97,7 @@ export async function getEmbedding(text: string): Promise<number[] | null> {
     }
 
     const data = await res.json();
-    return data.data[0].embedding;
+    return data.embedding.values;
   } catch (e) {
     console.error("Error generating embedding:", e);
     return null;
@@ -114,7 +116,7 @@ export async function findSimilarCache(embedding: number[]): Promise<any | null>
   try {
     const embeddingBuffer = float32Buffer(embedding);
     
-    // We want distance < 0.10 (which means similarity > 0.90)
+    // We want distance < 0.30
     const results = await redisClient.ft.search(
       INDEX_NAME,
       `*=>[KNN 1 @embedding $BLOB AS dist]`,
@@ -135,7 +137,7 @@ export async function findSimilarCache(embedding: number[]): Promise<any | null>
     if (!document) return null;
     const dist = parseFloat(document.value.dist as string);
     
-    if (dist < 0.10) {
+    if (dist < 0.30) {
       console.log(`Cache HIT! Distance: ${dist.toFixed(4)}`);
       return JSON.parse(document.value.response as string);
     }
