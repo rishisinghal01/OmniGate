@@ -159,11 +159,9 @@ export async function saveToCache(prompt: string, embedding: number[], response:
     const id = `${PREFIX}${Date.now()}`;
     const embeddingBuffer = float32Buffer(embedding);
 
-    await redisClient.hSet(id, {
-      prompt: prompt,
-      embedding: embeddingBuffer as any, // type casting for node-redis
-      response: JSON.stringify(response)
-    });
+    await redisClient.hSet(id, 'prompt', prompt);
+    await redisClient.hSet(id, 'embedding', embeddingBuffer);
+    await redisClient.hSet(id, 'response', JSON.stringify(response));
     
     // Optional: Set expiration (e.g., 24 hours)
     await redisClient.expire(id, 60 * 60 * 24);
