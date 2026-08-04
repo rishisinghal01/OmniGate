@@ -10,8 +10,8 @@ redisClient.on('error', (err) => console.error('Redis Client Error', err));
 let isConnected = false;
 let indexCreated = false;
 
-const INDEX_NAME = 'idx:semantic_cache_gemini';
-const PREFIX = 'cache_gemini:';
+const INDEX_NAME = 'idx:semantic_cache_gemini_v2';
+const PREFIX = 'cache_gemini_v2:';
 
 export async function connectRedis() {
   if (!isConnected) {
@@ -48,7 +48,7 @@ async function createVectorIndex() {
               type: SCHEMA_FIELD_TYPE.VECTOR,
               ALGORITHM: SCHEMA_VECTOR_FIELD_ALGORITHM.FLAT,
               TYPE: 'FLOAT32',
-              DIM: 768,
+              DIM: 3072, // Gemini gemini-embedding-2 outputs 3072 dimensions
               DISTANCE_METRIC: 'COSINE'
             }
           },
