@@ -8,7 +8,7 @@ dotenv.config();
 const app = express();
 const port = 3000;
 
-app.use(cors());
+app.use(cors({ exposedHeaders: ['x-cache'] }));
 app.use(express.json());
 
 // Root endpoint for browser checks
@@ -248,7 +248,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     if (latestMessage) {
       embedding = await getEmbedding(latestMessage);
       if (embedding) {
-        const cachedResponse = await findSimilarCache(embedding);
+        const cachedResponse = await findSimilarCache(embedding, model);
         if (cachedResponse) {
           res.setHeader('x-cache', 'HIT');
           return res.json(cachedResponse);
@@ -285,7 +285,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     // Save to Cache in background
     if (latestMessage && embedding && result) {
       // Don't await this, let it run in background
-      saveToCache(latestMessage, embedding, result).catch(e => console.error("Background cache save error", e));
+      saveToCache(latestMessage, embedding, model, result).catch(e => console.error("Background cache save error", e));
     }
 
   } catch (error) {

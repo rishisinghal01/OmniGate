@@ -10,8 +10,8 @@ redisClient.on('error', (err) => console.error('Redis Client Error', err));
 let isConnected = false;
 let indexCreated = false;
 
-const INDEX_NAME = 'idx:semantic_cache_gemini_v2';
-const PREFIX = 'cache_gemini_v2:';
+const INDEX_NAME = 'idx:semantic_cache_gemini_v3';
+const PREFIX = 'cache_gemini_v3:';
 
 export async function connectRedis() {
   if (!isConnected) {
@@ -43,6 +43,10 @@ async function createVectorIndex() {
               type: SCHEMA_FIELD_TYPE.TEXT,
               AS: 'prompt',
               WEIGHT: 1
+            },
+            model: {
+              type: SCHEMA_FIELD_TYPE.TAG,
+              AS: 'model'
             },
             embedding: {
               type: SCHEMA_FIELD_TYPE.VECTOR,
@@ -110,16 +114,17 @@ function float32Buffer(arr: number[]) {
 }
 
 // Search for similar cache entries
-export async function findSimilarCache(embedding: number[]): Promise<any | null> {
+export async function findSimilarCache(embedding: number[], model: string): Promise<any | null> {
   if (!isConnected) return null;
   
   try {
     const embeddingBuffer = float32Buffer(embedding);
+    const escapedModel = model.replace(/[,.<>{}[\]"':;!@#$%^&*()\-+=~|/]/g, '\\$&');
     
     // We want distance < 0.30
     const results = await redisClient.ft.search(
       INDEX_NAME,
-      `*=>[KNN 1 @embedding $BLOB AS dist]`,
+      `@model:{${escapedModel}}=>[KNN 1 @embedding $BLOB AS dist]`,
       {
         PARAMS: {
           BLOB: embeddingBuffer
@@ -152,7 +157,7 @@ export async function findSimilarCache(embedding: number[]): Promise<any | null>
 }
 
 // Save a new response to cache
-export async function saveToCache(prompt: string, embedding: number[], response: any) {
+export async function saveToCache(prompt: string, embedding: number[], model: string, response: any) {
   if (!isConnected) return;
   
   try {
@@ -160,6 +165,7 @@ export async function saveToCache(prompt: string, embedding: number[], response:
     const embeddingBuffer = float32Buffer(embedding);
 
     await redisClient.hSet(id, 'prompt', prompt);
+    await redisClient.hSet(id, 'model', model);
     await redisClient.hSet(id, 'embedding', embeddingBuffer);
     await redisClient.hSet(id, 'response', JSON.stringify(response));
     
