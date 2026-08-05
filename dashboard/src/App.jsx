@@ -6,20 +6,26 @@ const API_URL = 'http://localhost:3000/v1/chat/completions';
 const DEFAULT_API_KEY = 'test-key-123';
 
 function App() {
-  const [messages, setMessages] = useState([
-    { role: 'assistant', content: 'Hi! I am connected through OmniGate. Try sending me a message or switch models above.' }
-  ]);
+  const [messages, setMessages] = useState(() => {
+    const saved = localStorage.getItem('omnigate_messages');
+    return saved ? JSON.parse(saved) : [
+      { role: 'assistant', content: 'Hi! I am connected through OmniGate. Try sending me a message or switch models above.' }
+    ];
+  });
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [model, setModel] = useState('mock-test');
+  const [model, setModel] = useState(() => localStorage.getItem('omnigate_model') || 'mock-test');
   const [activeTab, setActiveTab] = useState('curl');
   const [copied, setCopied] = useState(false);
   
-  const [metrics, setMetrics] = useState({
-    lastRequestTime: 0,
-    isCacheHit: false,
-    totalRequests: 0,
-    cacheHits: 0
+  const [metrics, setMetrics] = useState(() => {
+    const saved = localStorage.getItem('omnigate_metrics');
+    return saved ? JSON.parse(saved) : {
+      lastRequestTime: 0,
+      isCacheHit: false,
+      totalRequests: 0,
+      cacheHits: 0
+    };
   });
 
   const messagesEndRef = useRef(null);
@@ -29,8 +35,17 @@ function App() {
   };
 
   useEffect(() => {
+    localStorage.setItem('omnigate_messages', JSON.stringify(messages));
     scrollToBottom();
   }, [messages]);
+
+  useEffect(() => {
+    localStorage.setItem('omnigate_model', model);
+  }, [model]);
+
+  useEffect(() => {
+    localStorage.setItem('omnigate_metrics', JSON.stringify(metrics));
+  }, [metrics]);
 
   const handleSend = async () => {
     if (!input.trim()) return;
