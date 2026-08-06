@@ -1,13 +1,15 @@
 import React from 'react';
-import { Home, Bot, Activity, Zap, Server, DollarSign, HeartPulse } from 'lucide-react';
+import { Home, Bot, Activity, Zap, Server, Key, Terminal } from 'lucide-react';
 
 const Sidebar = ({ activePage, setActivePage }) => {
   const navItems = [
     { id: 'home', label: 'Overview', icon: Home },
     { id: 'playground', label: 'Playground', icon: Bot },
-    { id: 'metrics', label: 'API & Metrics', icon: Activity },
-    { id: 'cost', label: 'Cost Analytics', icon: DollarSign },
-    { id: 'health', label: 'Model Health', icon: HeartPulse },
+    { id: 'metrics', label: 'API Metrics', icon: Activity },
+    { id: 'cost', label: 'Cost Analytics', icon: Zap },
+    { id: 'health', label: 'Model Health', icon: Server },
+    { id: 'logs', label: 'Live Logs', icon: Terminal },
+    { id: 'keys', label: 'API Keys', icon: Key },
   ];
 
   return (

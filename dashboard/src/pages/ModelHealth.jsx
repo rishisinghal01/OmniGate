@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Activity, Server, ArrowRightLeft, ShieldAlert, CheckCircle2 } from 'lucide-react';
 
 const ModelHealth = () => {
-  // Mocking real-time fluctuating health
+  const [metrics, setMetrics] = useState({ uptime: 0, memoryUsedMB: 0, totalRequests: 0, status: 'connecting...' });
   const [healthData, setHealthData] = useState([
     { provider: 'OpenAI (GPT-4o)', status: 'operational', latency: 120, uptime: '99.98%' },
     { provider: 'Anthropic (Claude 3)', status: 'degraded', latency: 850, uptime: '98.45%' },
@@ -10,22 +10,20 @@ const ModelHealth = () => {
     { provider: 'OpenRouter (Llama 3)', status: 'down', latency: 0, uptime: '94.20%' },
   ]);
 
-  // Simulate real-time pings changing statuses slightly
   useEffect(() => {
-    const interval = setInterval(() => {
-      setHealthData(prev => prev.map(model => {
-        if (model.status === 'down') return model;
-        
-        const latencyWobble = Math.floor(Math.random() * 40) - 20; // -20 to +20
-        let newLatency = Math.max(50, model.latency + latencyWobble);
-        
-        let newStatus = model.status;
-        if (newLatency > 800) newStatus = 'degraded';
-        else if (newLatency < 600) newStatus = 'operational';
-
-        return { ...model, latency: newLatency, status: newStatus };
-      }));
-    }, 3000);
+    // Poll real server metrics
+    const fetchMetrics = async () => {
+      try {
+        const res = await fetch('http://localhost:3000/v1/admin/metrics');
+        const data = await res.json();
+        setMetrics(data);
+      } catch (e) {
+        setMetrics(prev => ({ ...prev, status: 'offline' }));
+      }
+    };
+    
+    fetchMetrics();
+    const interval = setInterval(fetchMetrics, 2000);
     return () => clearInterval(interval);
   }, []);
 
@@ -48,6 +46,27 @@ const ModelHealth = () => {
 
       <div className="features-grid" style={{ gridTemplateColumns: '1fr', gap: '2rem' }}>
         
+        <div className="stats-section glass-panel stagger-1" style={{ padding: '2rem', display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '1rem' }}>
+          <div className="stat-box">
+            <div className="stat-value" style={{ fontSize: '2rem' }}>{metrics.uptime}s</div>
+            <div className="stat-label">Gateway Uptime</div>
+          </div>
+          <div className="stat-box">
+            <div className="stat-value" style={{ fontSize: '2rem', color: metrics.status === 'offline' ? 'var(--error-color)' : 'var(--success-color)' }}>
+              {metrics.status === 'offline' ? 'Offline' : 'Operational'}
+            </div>
+            <div className="stat-label">System Status</div>
+          </div>
+          <div className="stat-box">
+            <div className="stat-value" style={{ fontSize: '2rem' }}>{metrics.memoryUsedMB} MB</div>
+            <div className="stat-label">Memory Usage</div>
+          </div>
+          <div className="stat-box">
+            <div className="stat-value" style={{ fontSize: '2rem' }}>{metrics.totalRequests}</div>
+            <div className="stat-label">Total Requests</div>
+          </div>
+        </div>
+
         {/* Failover Visualizer */}
         <div className="glass-panel" style={{ padding: '2rem' }}>
           <div className="section-title" style={{ marginBottom: '2rem' }}>

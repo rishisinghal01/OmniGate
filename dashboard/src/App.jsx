@@ -5,6 +5,8 @@ import Playground from './pages/Playground';
 import Metrics from './pages/Metrics';
 import CostAnalytics from './pages/CostAnalytics';
 import ModelHealth from './pages/ModelHealth';
+import LiveLogs from './pages/LiveLogs';
+import ApiKeys from './pages/ApiKeys';
 import './index.css';
 
 function App() {
@@ -39,6 +41,8 @@ function App() {
         {activePage === 'metrics' && <Metrics metrics={metrics} model={model} />}
         {activePage === 'cost' && <CostAnalytics metrics={metrics} />}
         {activePage === 'health' && <ModelHealth />}
+        {activePage === 'logs' && <LiveLogs />}
+        {activePage === 'keys' && <ApiKeys />}
       </main>
     </div>
   );
