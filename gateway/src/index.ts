@@ -2,6 +2,8 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { connectRedis, getEmbedding, findSimilarCache, saveToCache } from './cache.js';
+import { prisma } from './db.js';
+import { checkRateLimit } from './rateLimit.js';
 // Load variables from .env file
 dotenv.config();
 
@@ -232,8 +234,23 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
 
     const token = authHeader.split(' ')[1];
-    if (token !== 'test-key-123') {
-      return res.status(401).json({ error: "Wrong API key. Try 'test-key-123'." });
+    
+    // DB Auth check
+    const apiKey = await prisma.apiKey.findUnique({
+      where: { key: token }
+    });
+
+    if (!apiKey || !apiKey.isActive) {
+      return res.status(401).json({ error: "Invalid or inactive API key." });
+    }
+
+    // Rate Limiting check
+    const rateLimit = await checkRateLimit(apiKey.teamName);
+    res.setHeader('X-RateLimit-Limit', rateLimit.limit.toString());
+    res.setHeader('X-RateLimit-Remaining', rateLimit.remaining.toString());
+    
+    if (!rateLimit.allowed) {
+      return res.status(429).json({ error: "Rate limit exceeded. Please try again later." });
     }
 
     const body = req.body;
