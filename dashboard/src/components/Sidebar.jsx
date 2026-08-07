@@ -1,7 +1,7 @@
 import React from 'react';
 import { Home, Bot, Activity, Zap, Server, Key, Terminal } from 'lucide-react';
 
-const Sidebar = ({ activePage, setActivePage }) => {
+const Sidebar = ({ activePage, setActivePage, isConnected }) => {
   const navItems = [
     { id: 'home', label: 'Overview', icon: Home },
     { id: 'playground', label: 'Playground', icon: Bot },
@@ -41,8 +41,8 @@ const Sidebar = ({ activePage, setActivePage }) => {
 
       <div className="sidebar-footer">
         <div className="status-indicator">
-          <div className="status-dot online"></div>
-          <span>Gateway Online</span>
+          <div className={`status-dot ${isConnected ? 'online' : ''}`} style={{ background: isConnected ? '' : 'var(--error-color)' }}></div>
+          <span>{isConnected ? 'Gateway Online' : 'Gateway Offline'}</span>
         </div>
         <div className="status-port">
           <Server size={14} /> Port 3000

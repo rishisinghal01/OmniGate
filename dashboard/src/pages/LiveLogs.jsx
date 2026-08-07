@@ -2,24 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import { io } from 'socket.io-client';
 import { Terminal, Activity, Zap, Server } from 'lucide-react';
 
-const LiveLogs = () => {
-  const [logs, setLogs] = useState([]);
-  const [isConnected, setIsConnected] = useState(false);
+const LiveLogs = ({ logs, isConnected }) => {
   const logsEndRef = useRef(null);
-
-  useEffect(() => {
-    // Connect to WebSocket on the gateway
-    const socket = io('http://localhost:3000');
-    
-    socket.on('connect', () => setIsConnected(true));
-    socket.on('disconnect', () => setIsConnected(false));
-    
-    socket.on('apiRequest', (data) => {
-      setLogs(prev => [...prev, data].slice(-100)); // Keep last 100 logs
-    });
-
-    return () => socket.disconnect();
-  }, []);
 
   useEffect(() => {
     // Auto scroll to bottom

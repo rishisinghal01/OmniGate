@@ -286,6 +286,15 @@ app.post('/v1/chat/completions', async (req, res) => {
       return res.status(400).json({ error: "You forgot to specify a model in the JSON body!" });
     }
 
+    const fallbacks: string[] = body.fallbacks || [];
+    
+    // Add default fallbacks if none are provided
+    if (fallbacks.length === 0) {
+      if (model === 'gpt-4o') fallbacks.push('claude-3-opus-20240229');
+    }
+    
+    const modelsToTry = [model, ...fallbacks];
+
     // 1. Extract the user's latest message for caching
     const messages = body.messages || [];
     const latestMessage = messages[messages.length - 1]?.content;
@@ -295,25 +304,19 @@ app.post('/v1/chat/completions', async (req, res) => {
     if (latestMessage) {
       embedding = await getEmbedding(latestMessage);
       if (embedding) {
-        const cachedResponse = await findSimilarCache(embedding, model);
-        if (cachedResponse) {
-          res.setHeader('x-cache', 'HIT');
-          cacheHit = true;
-          io.emit('apiRequest', { time: Date.now(), latency: Math.round(performance.now() - requestStartTime), status: 200, model: model, cache: 'HIT', team: apiKey.teamName });
-          return res.json(cachedResponse);
+        for (const m of modelsToTry) {
+          const cachedResponse = await findSimilarCache(embedding, m);
+          if (cachedResponse) {
+            res.setHeader('x-cache', 'HIT');
+            cacheHit = true;
+            io.emit('apiRequest', { time: Date.now(), latency: Math.round(performance.now() - requestStartTime), status: 200, model: m, cache: 'HIT', team: apiKey.teamName });
+            return res.json(cachedResponse);
+          }
         }
       }
     }
 
     let result;
-    const fallbacks: string[] = body.fallbacks || [];
-    
-    // Add default fallbacks if none are provided
-    if (fallbacks.length === 0) {
-      if (model === 'gpt-4o') fallbacks.push('claude-3-opus-20240229');
-    }
-    
-    const modelsToTry = [model, ...fallbacks];
     let lastError = null;
 
     for (const m of modelsToTry) {
