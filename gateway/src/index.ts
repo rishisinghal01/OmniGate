@@ -23,6 +23,20 @@ const io = new Server(httpServer, {
 const serverStartTime = Date.now();
 let totalRequestsProcessed = 0;
 
+async function logRequest(data: { time: number, latency: number, status: number, model: string, cache: string, team: string }) {
+  io.emit('apiRequest', data);
+  prisma.requestLog.create({
+    data: {
+      model: data.model,
+      latency: data.latency,
+      status: data.status,
+      teamName: data.team,
+      cacheHit: data.cache === 'HIT'
+    }
+  }).catch(e => console.error("Log save error:", e));
+}
+
+
 app.use(cors({ exposedHeaders: ['x-cache'] }));
 app.use(express.json());
 
@@ -249,7 +263,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     const authHeader = req.headers.authorization;
     if (!authHeader) {
       finalStatus = 401;
-      io.emit('apiRequest', { time: Date.now(), latency: Math.round(performance.now() - requestStartTime), status: finalStatus, model: req.body?.model || 'unknown', cache: 'MISS', team: 'unknown' });
+      logRequest({ time: Date.now(), latency: Math.round(performance.now() - requestStartTime), status: finalStatus, model: req.body?.model || 'unknown', cache: 'MISS', team: 'unknown' });
       return res.status(401).json({ error: "No API key provided!" });
     }
 
@@ -262,18 +276,18 @@ app.post('/v1/chat/completions', async (req, res) => {
 
     if (!apiKey || !apiKey.isActive) {
       finalStatus = 401;
-      io.emit('apiRequest', { time: Date.now(), latency: Math.round(performance.now() - requestStartTime), status: finalStatus, model: req.body?.model || 'unknown', cache: 'MISS', team: apiKey?.teamName || 'unknown' });
+      logRequest({ time: Date.now(), latency: Math.round(performance.now() - requestStartTime), status: finalStatus, model: req.body?.model || 'unknown', cache: 'MISS', team: apiKey?.teamName || 'unknown' });
       return res.status(401).json({ error: "Invalid or inactive API key." });
     }
 
     // Rate Limiting check
-    const rateLimit = await checkRateLimit(apiKey.teamName);
+    const rateLimit = await checkRateLimit(apiKey.teamName, apiKey.rateLimit, apiKey.rateLimitWindow);
     res.setHeader('X-RateLimit-Limit', rateLimit.limit.toString());
     res.setHeader('X-RateLimit-Remaining', rateLimit.remaining.toString());
     
     if (!rateLimit.allowed) {
       finalStatus = 429;
-      io.emit('apiRequest', { time: Date.now(), latency: Math.round(performance.now() - requestStartTime), status: finalStatus, model: req.body?.model || 'unknown', cache: 'MISS', team: apiKey.teamName });
+      logRequest({ time: Date.now(), latency: Math.round(performance.now() - requestStartTime), status: finalStatus, model: req.body?.model || 'unknown', cache: 'MISS', team: apiKey.teamName });
       return res.status(429).json({ error: "Rate limit exceeded. Please try again later." });
     }
 
@@ -282,7 +296,7 @@ app.post('/v1/chat/completions', async (req, res) => {
 
     if (!model) {
       finalStatus = 400;
-      io.emit('apiRequest', { time: Date.now(), latency: Math.round(performance.now() - requestStartTime), status: finalStatus, model: 'unknown', cache: 'MISS', team: apiKey.teamName });
+      logRequest({ time: Date.now(), latency: Math.round(performance.now() - requestStartTime), status: finalStatus, model: 'unknown', cache: 'MISS', team: apiKey.teamName });
       return res.status(400).json({ error: "You forgot to specify a model in the JSON body!" });
     }
 
@@ -309,7 +323,7 @@ app.post('/v1/chat/completions', async (req, res) => {
           if (cachedResponse) {
             res.setHeader('x-cache', 'HIT');
             cacheHit = true;
-            io.emit('apiRequest', { time: Date.now(), latency: Math.round(performance.now() - requestStartTime), status: 200, model: m, cache: 'HIT', team: apiKey.teamName });
+            logRequest({ time: Date.now(), latency: Math.round(performance.now() - requestStartTime), status: 200, model: m, cache: 'HIT', team: apiKey.teamName });
             return res.json(cachedResponse);
           }
         }
@@ -333,7 +347,7 @@ app.post('/v1/chat/completions', async (req, res) => {
 
     if (!result) {
       finalStatus = 502;
-      io.emit('apiRequest', { time: Date.now(), latency: Math.round(performance.now() - requestStartTime), status: finalStatus, model: model, cache: 'MISS', team: apiKey.teamName });
+      logRequest({ time: Date.now(), latency: Math.round(performance.now() - requestStartTime), status: finalStatus, model: model, cache: 'MISS', team: apiKey.teamName });
       return res.status(502).json({ error: `All models failed. Last error: ${lastError?.message}` });
     }
 
@@ -342,7 +356,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     res.json(result);
     
     // Emit successful log
-    io.emit('apiRequest', { time: Date.now(), latency: Math.round(performance.now() - requestStartTime), status: 200, model: model, cache: 'MISS', team: apiKey.teamName });
+    logRequest({ time: Date.now(), latency: Math.round(performance.now() - requestStartTime), status: 200, model: model, cache: 'MISS', team: apiKey.teamName });
 
     // Save to Cache in background
     if (latestMessage && embedding && result) {
@@ -352,7 +366,7 @@ app.post('/v1/chat/completions', async (req, res) => {
 
   } catch (error) {
     console.error("Oops, something went wrong:", error);
-    io.emit('apiRequest', { time: Date.now(), latency: Math.round(performance.now() - requestStartTime), status: 500, model: 'unknown', cache: 'MISS', team: 'unknown' });
+    logRequest({ time: Date.now(), latency: Math.round(performance.now() - requestStartTime), status: 500, model: 'unknown', cache: 'MISS', team: 'unknown' });
     res.status(500).json({ error: "Something broke on the server!" });
   }
 });
@@ -376,14 +390,28 @@ app.get('/v1/admin/keys', async (req, res) => {
 
 // Admin API: Create Key
 app.post('/v1/admin/keys', async (req, res) => {
-  const { teamName } = req.body;
+  const { teamName, rateLimit, rateLimitWindow } = req.body;
   if (!teamName) return res.status(400).json({ error: "teamName required" });
   
   const keyString = "og-" + crypto.randomBytes(16).toString('hex');
   const newKey = await prisma.apiKey.create({
-    data: { key: keyString, teamName }
+    data: { 
+      key: keyString, 
+      teamName,
+      ...(rateLimit && { rateLimit: parseInt(rateLimit, 10) }),
+      ...(rateLimitWindow && { rateLimitWindow: parseInt(rateLimitWindow, 10) })
+    }
   });
   res.json(newKey);
+});
+
+// Admin API: Get Logs
+app.get('/v1/admin/logs', async (req, res) => {
+  const logs = await prisma.requestLog.findMany({ 
+    orderBy: { timestamp: 'desc' },
+    take: 100
+  });
+  res.json(logs);
 });
 
 // Admin API: Delete/Revoke Key

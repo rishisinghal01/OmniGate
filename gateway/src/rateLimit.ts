@@ -6,7 +6,7 @@ export interface RateLimitResult {
   remaining: number;
 }
 
-export async function checkRateLimit(teamName: string, limit: number = 100, windowSeconds: number = 60): Promise<RateLimitResult> {
+export async function checkRateLimit(teamName: string, limit: number, windowSeconds: number): Promise<RateLimitResult> {
   const key = `ratelimit:${teamName}`;
   
   try {
