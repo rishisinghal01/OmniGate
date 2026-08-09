@@ -7,6 +7,7 @@ import crypto from 'crypto';
 import { connectRedis, getEmbedding, findSimilarCache, saveToCache } from './cache.js';
 import { prisma } from './db.js';
 import { checkRateLimit } from './rateLimit.js';
+import { Readable } from 'stream';
 
 dotenv.config();
 
@@ -15,7 +16,7 @@ const port = 3000;
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: {
-    origin: "*", // allow dashboard to connect
+    origin: "*",
     methods: ["GET", "POST"]
   }
 });
@@ -23,7 +24,21 @@ const io = new Server(httpServer, {
 const serverStartTime = Date.now();
 let totalRequestsProcessed = 0;
 
-async function logRequest(data: { time: number, latency: number, status: number, model: string, cache: string, team: string }) {
+const PRICING_TABLE: Record<string, { prompt: number; completion: number }> = {
+  'gpt-4o': { prompt: 5.0, completion: 15.0 }, // per 1M tokens
+  'claude-3-opus-20240229': { prompt: 15.0, completion: 75.0 },
+  'gemini-2.5-flash': { prompt: 0.075, completion: 0.30 },
+  'mock-test': { prompt: 0, completion: 0 },
+  'openrouter/poolside/laguna-s-2.1:free': { prompt: 0, completion: 0 },
+  'openrouter/inclusionai/ling-3.0-flash:free': { prompt: 0, completion: 0 },
+};
+
+function calculateCost(model: string, promptTokens: number, completionTokens: number) {
+  const pricing = PRICING_TABLE[model] || { prompt: 0, completion: 0 };
+  return (promptTokens * pricing.prompt / 1000000) + (completionTokens * pricing.completion / 1000000);
+}
+
+async function logRequest(data: { time: number, latency: number, status: number, model: string, cache: string, team: string, promptTokens?: number, completionTokens?: number, totalTokens?: number, cost?: number }) {
   io.emit('apiRequest', data);
   prisma.requestLog.create({
     data: {
@@ -31,7 +46,11 @@ async function logRequest(data: { time: number, latency: number, status: number,
       latency: data.latency,
       status: data.status,
       teamName: data.team,
-      cacheHit: data.cache === 'HIT'
+      cacheHit: data.cache === 'HIT',
+      promptTokens: data.promptTokens || 0,
+      completionTokens: data.completionTokens || 0,
+      totalTokens: data.totalTokens || 0,
+      cost: data.cost || 0
     }
   }).catch(e => console.error("Log save error:", e));
 }
@@ -40,20 +59,47 @@ async function logRequest(data: { time: number, latency: number, status: number,
 app.use(cors({ exposedHeaders: ['x-cache'] }));
 app.use(express.json());
 
-// Root endpoint for browser checks
 app.get('/', (req, res) => {
   res.send('OmniGate API is running! 🚀 Send a POST request to /v1/chat/completions to interact.');
 });
 
-// Helper function for Mock (Free testing without keys!)
-async function callMock(body: any) {
+async function fetchMock(body: any) {
   console.log("Routing to Mock...");
-  
-  return {
+  if (body.stream) {
+    const text = "Bhai yeh ek mock response hai! Aapka gateway ekdum mast kaam kar raha hai bina kisi API key ke! 🚀";
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      start(controller) {
+        let i = 0;
+        const words = text.split(' ');
+        const interval = setInterval(() => {
+          if (i >= words.length) {
+            controller.enqueue(encoder.encode(`data: [DONE]\n\n`));
+            controller.close();
+            clearInterval(interval);
+            return;
+          }
+          const chunk = {
+            id: "mock-" + Date.now(),
+            object: "chat.completion.chunk",
+            created: Math.floor(Date.now() / 1000),
+            model: body.model,
+            choices: [{ delta: { content: words[i] + ' ' }, index: 0, finish_reason: null }]
+          };
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
+          i++;
+        }, 50);
+      }
+    });
+    return new Response(stream, { headers: { 'Content-Type': 'text/event-stream' } });
+  }
+
+  return new Response(JSON.stringify({
     id: "mock-" + Date.now(),
     object: "chat.completion",
     created: Math.floor(Date.now() / 1000),
     model: body.model,
+    usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 },
     choices: [
       {
         index: 0,
@@ -64,34 +110,34 @@ async function callMock(body: any) {
         finish_reason: "stop"
       }
     ]
-  };
+  }), { headers: { 'Content-Type': 'application/json' } });
 }
 
-// Helper function to call OpenAI
-async function callOpenAI(body: any) {
+async function fetchOpenAI(body: any) {
   const openaiKey = process.env.OPENAI_API_KEY;
   console.log("Routing to OpenAI...");
+  const payload = { ...body };
+  if (payload.stream) {
+    payload.stream_options = { include_usage: true };
+  }
   const response = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${openaiKey}`
     },
-    body: JSON.stringify(body)
+    body: JSON.stringify(payload)
   });
-  const data = await response.json();
-  if (!response.ok || data.error) {
-    throw new Error(`OpenAI API Error: ${data.error?.message || response.statusText}`);
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`OpenAI API Error: ${err}`);
   }
-  return data;
+  return response;
 }
 
-// Helper function to call Claude (Anthropic)
-async function callClaude(body: any) {
+async function fetchClaude(body: any) {
   const anthropicKey = process.env.ANTHROPIC_API_KEY;
   console.log("Routing to Claude...");
-
-  // 1. Anthropic wants the system prompt separate from the messages
   let systemPrompt = "";
   const filteredMessages = body.messages.filter((m: any) => {
     if (m.role === 'system') {
@@ -101,7 +147,6 @@ async function callClaude(body: any) {
     return true;
   });
 
-  // 2. Make the request to Anthropic
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -113,146 +158,83 @@ async function callClaude(body: any) {
       model: body.model,
       max_tokens: body.max_tokens || 1024,
       system: systemPrompt,
-      messages: filteredMessages
+      messages: filteredMessages,
+      stream: body.stream
     })
   });
 
-  const claudeData = await response.json();
-
-  if (!response.ok || claudeData.type === 'error') {
-    throw new Error(`Claude API Error: ${claudeData.error?.message || response.statusText}`);
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`Claude API Error: ${err}`);
   }
-
-  // 3. Translate Claude's response to look exactly like OpenAI's!
-  // This tricks the frontend into thinking it's always talking to OpenAI
-  return {
-    id: claudeData.id,
-    object: "chat.completion",
-    created: Math.floor(Date.now() / 1000),
-    model: body.model,
-    choices: [
-      {
-        index: 0,
-        message: {
-          role: "assistant",
-          content: claudeData.content?.[0]?.text || "Error getting response"
-        },
-        finish_reason: "stop"
-      }
-    ]
-  };
+  return response;
 }
 
-// Helper function to call Google Gemini
-async function callGemini(body: any) {
+async function fetchGemini(body: any) {
   const geminiKey = process.env.GEMINI_API_KEY;
   console.log("Routing to Gemini...");
+  const geminiContents = body.messages.map((m: any) => ({
+    role: m.role === 'assistant' ? 'model' : 'user', 
+    parts: [{ text: m.content }]
+  }));
 
-  // 1. Translate OpenAI messages to Gemini format
-  const geminiContents = body.messages.map((m: any) => {
-    return {
-      // Gemini uses "user" and "model", OpenAI uses "user" and "assistant"
-      role: m.role === 'assistant' ? 'model' : 'user', 
-      parts: [{ text: m.content }]
-    };
-  });
-
-  // 2. Make the request to Gemini
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${body.model}:generateContent?key=${geminiKey}`;
+  const isStream = body.stream;
+  const endpoint = isStream ? 'streamGenerateContent?alt=sse' : 'generateContent';
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${body.model}:${endpoint}&key=${geminiKey}`;
+  
   const response = await fetch(url, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      contents: geminiContents
-    })
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ contents: geminiContents })
   });
 
-  const geminiData = await response.json();
-  
-  if (!response.ok || geminiData.error) {
-    throw new Error(`Gemini API Error: ${geminiData.error?.message || response.statusText}`);
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`Gemini API Error: ${err}`);
   }
-
-  // Log the raw response so we can see what went wrong in the terminal
-  console.log("Gemini API Response:", JSON.stringify(geminiData, null, 2));
-
-  let content = "Error getting response";
-  if (geminiData.candidates?.[0]?.content?.parts?.[0]?.text) {
-    content = geminiData.candidates[0].content.parts[0].text;
-  }
-
-  // 3. Translate Gemini's response to look exactly like OpenAI's
-  return {
-    id: "gemini-" + Date.now(),
-    object: "chat.completion",
-    created: Math.floor(Date.now() / 1000),
-    model: body.model,
-    choices: [
-      {
-        index: 0,
-        message: {
-          role: "assistant",
-          content: content
-        },
-        finish_reason: "stop"
-      }
-    ]
-  };
+  return response;
 }
 
-// Helper function to call OpenRouter
-async function callOpenRouter(body: any) {
+async function fetchOpenRouter(body: any) {
   const openRouterKey = process.env.OPENROUTER_API_KEY;
   console.log("Routing to OpenRouter...");
-  
-  // OpenRouter uses the exact same format as OpenAI!
-  // We just need to change the URL and the API key header.
-  
-  // Optional: OpenRouter asks to remove the 'openrouter/' prefix from the model name 
-  // before sending the request, or we can just send it as is if OpenRouter expects it.
-  // Actually, OpenRouter expects the model name like 'google/gemini-2.5-flash', 
-  // so if the user passes 'openrouter/google/gemini-2.5-flash', we strip 'openrouter/'.
   let targetModel = body.model;
   if (targetModel.startsWith('openrouter/')) {
     targetModel = targetModel.replace('openrouter/', '');
   }
-  
   const payload = { ...body, model: targetModel };
+  if (payload.stream) {
+    payload.stream_options = { include_usage: true };
+  }
 
   const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${openRouterKey}`,
-      'HTTP-Referer': 'http://localhost:3000', // OpenRouter requires these headers for rankings
+      'HTTP-Referer': 'http://localhost:3000',
       'X-Title': 'OmniGate'
     },
     body: JSON.stringify(payload)
   });
   
-  const openRouterData = await response.json();
-  
-  if (!response.ok || openRouterData.error) {
-    throw new Error(`OpenRouter API Error: ${openRouterData.error?.message || response.statusText}`);
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`OpenRouter API Error: ${err}`);
   }
-  
-  return openRouterData;
+  return response;
 }
 
-// Wrapper to route by model name
-async function callModel(model: string, body: any) {
+async function callProvider(model: string, body: any): Promise<Response> {
   const payload = { ...body, model };
-  if (model.startsWith('gpt')) return await callOpenAI(payload);
-  if (model.startsWith('claude')) return await callClaude(payload);
-  if (model.startsWith('gemini')) return await callGemini(payload);
-  if (model.startsWith('mock')) return await callMock(payload);
-  if (model.startsWith('openrouter/')) return await callOpenRouter(payload);
-  throw new Error(`Unknown model: ${model}. Try mock-test, openrouter/..., gpt-4, claude-3, or gemini-2.0-flash.`);
+  if (model.startsWith('gpt')) return await fetchOpenAI(payload);
+  if (model.startsWith('claude')) return await fetchClaude(payload);
+  if (model.startsWith('gemini')) return await fetchGemini(payload);
+  if (model.startsWith('mock')) return await fetchMock(payload);
+  if (model.startsWith('openrouter/')) return await fetchOpenRouter(payload);
+  throw new Error(`Unknown model: ${model}`);
 }
 
-// Our main endpoint
 app.post('/v1/chat/completions', async (req, res) => {
   const requestStartTime = performance.now();
   totalRequestsProcessed++;
@@ -268,11 +250,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
 
     const token = authHeader.split(' ')[1];
-    
-    // DB Auth check
-    const apiKey = await prisma.apiKey.findUnique({
-      where: { key: token }
-    });
+    const apiKey = await prisma.apiKey.findUnique({ where: { key: token } });
 
     if (!apiKey || !apiKey.isActive) {
       finalStatus = 401;
@@ -280,7 +258,6 @@ app.post('/v1/chat/completions', async (req, res) => {
       return res.status(401).json({ error: "Invalid or inactive API key." });
     }
 
-    // Rate Limiting check
     const rateLimit = await checkRateLimit(apiKey.teamName, apiKey.rateLimit, apiKey.rateLimitWindow);
     res.setHeader('X-RateLimit-Limit', rateLimit.limit.toString());
     res.setHeader('X-RateLimit-Remaining', rateLimit.remaining.toString());
@@ -301,20 +278,17 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
 
     const fallbacks: string[] = body.fallbacks || [];
-    
-    // Add default fallbacks if none are provided
     if (fallbacks.length === 0) {
       if (model === 'gpt-4o') fallbacks.push('claude-3-opus-20240229');
     }
-    
     const modelsToTry = [model, ...fallbacks];
 
-    // 1. Extract the user's latest message for caching
     const messages = body.messages || [];
     const latestMessage = messages[messages.length - 1]?.content;
     let embedding: number[] | null = null;
+    let isStream = body.stream === true;
 
-    // 2. Check Semantic Cache
+    // Semantic Cache Check
     if (latestMessage) {
       embedding = await getEmbedding(latestMessage);
       if (embedding) {
@@ -322,46 +296,168 @@ app.post('/v1/chat/completions', async (req, res) => {
           const cachedResponse = await findSimilarCache(embedding, m);
           if (cachedResponse) {
             res.setHeader('x-cache', 'HIT');
-            cacheHit = true;
-            logRequest({ time: Date.now(), latency: Math.round(performance.now() - requestStartTime), status: 200, model: m, cache: 'HIT', team: apiKey.teamName });
-            return res.json(cachedResponse);
+            
+            logRequest({ time: Date.now(), latency: Math.round(performance.now() - requestStartTime), status: 200, model: m, cache: 'HIT', team: apiKey.teamName, promptTokens: 0, completionTokens: 0, totalTokens: 0, cost: 0 });
+            
+            if (isStream) {
+              res.setHeader('Content-Type', 'text/event-stream');
+              res.setHeader('Cache-Control', 'no-cache');
+              res.setHeader('Connection', 'keep-alive');
+              
+              const content = cachedResponse.choices[0].message.content;
+              const chunks = content.split(' ');
+              let i = 0;
+              const interval = setInterval(() => {
+                if (i >= chunks.length) {
+                  res.write(`data: [DONE]\n\n`);
+                  res.end();
+                  clearInterval(interval);
+                  return;
+                }
+                const chunkData = {
+                  id: "cache-" + Date.now(),
+                  object: "chat.completion.chunk",
+                  created: Math.floor(Date.now() / 1000),
+                  model: m,
+                  choices: [{ delta: { content: chunks[i] + (i < chunks.length - 1 ? ' ' : '') }, index: 0, finish_reason: null }]
+                };
+                res.write(`data: ${JSON.stringify(chunkData)}\n\n`);
+                i++;
+              }, 20); // stream words from cache
+              return;
+            } else {
+              return res.json(cachedResponse);
+            }
           }
         }
       }
     }
 
-    let result;
+    let resultResponse: Response | null = null;
     let lastError = null;
 
     for (const m of modelsToTry) {
       try {
         console.log(`[Failover] Attempting model: ${m}`);
-        result = await callModel(m, body);
-        model = m; // Update model to the one that succeeded for caching
-        break; // Success!
+        resultResponse = await callProvider(m, body);
+        model = m;
+        break;
       } catch (e: any) {
         console.error(`[Failover] Model ${m} failed:`, e.message);
         lastError = e;
       }
     }
 
-    if (!result) {
+    if (!resultResponse) {
       finalStatus = 502;
       logRequest({ time: Date.now(), latency: Math.round(performance.now() - requestStartTime), status: finalStatus, model: model, cache: 'MISS', team: apiKey.teamName });
       return res.status(502).json({ error: `All models failed. Last error: ${lastError?.message}` });
     }
 
-    // Send the result back to the user
     res.setHeader('x-cache', 'MISS');
-    res.json(result);
-    
-    // Emit successful log
-    logRequest({ time: Date.now(), latency: Math.round(performance.now() - requestStartTime), status: 200, model: model, cache: 'MISS', team: apiKey.teamName });
 
-    // Save to Cache in background
-    if (latestMessage && embedding && result) {
-      // Don't await this, let it run in background
-      saveToCache(latestMessage, embedding, model, result).catch(e => console.error("Background cache save error", e));
+    if (isStream) {
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      
+      const reader = resultResponse.body?.getReader();
+      if (!reader) throw new Error("No response body");
+      const decoder = new TextDecoder("utf-8");
+      
+      let fullContent = "";
+      let promptTokens = 0;
+      let completionTokens = 0;
+      
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const chunkStr = decoder.decode(value, { stream: true });
+          res.write(chunkStr);
+          
+          const lines = chunkStr.split('\n');
+          for (const line of lines) {
+            if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+              try {
+                const data = JSON.parse(line.slice(6));
+                if (data.choices?.[0]?.delta?.content) {
+                  fullContent += data.choices[0].delta.content;
+                }
+                if (data.usage) {
+                  promptTokens = data.usage.prompt_tokens || 0;
+                  completionTokens = data.usage.completion_tokens || 0;
+                }
+              } catch(e) {}
+            }
+          }
+        }
+      } finally {
+        res.end();
+        const totalTokens = promptTokens + completionTokens;
+        const cost = calculateCost(model, promptTokens, completionTokens);
+        
+        logRequest({ time: Date.now(), latency: Math.round(performance.now() - requestStartTime), status: 200, model: model, cache: 'MISS', team: apiKey.teamName, promptTokens, completionTokens, totalTokens, cost });
+        
+        if (latestMessage && embedding && fullContent.trim().length > 0) {
+           const fakeResult = {
+             id: "cached-" + Date.now(),
+             object: "chat.completion",
+             created: Math.floor(Date.now() / 1000),
+             model: model,
+             choices: [{ index: 0, message: { role: "assistant", content: fullContent }, finish_reason: "stop" }]
+           };
+           saveToCache(latestMessage, embedding, model, fakeResult).catch(e => console.error("Background cache save error", e));
+        }
+      }
+    } else {
+      let data: any;
+      
+      if (model.startsWith('claude')) {
+         const claudeData = await resultResponse.json();
+         data = {
+            id: claudeData.id,
+            object: "chat.completion",
+            created: Math.floor(Date.now() / 1000),
+            model: model,
+            usage: {
+              prompt_tokens: claudeData.usage?.input_tokens || 0,
+              completion_tokens: claudeData.usage?.output_tokens || 0,
+              total_tokens: (claudeData.usage?.input_tokens || 0) + (claudeData.usage?.output_tokens || 0)
+            },
+            choices: [{ index: 0, message: { role: "assistant", content: claudeData.content?.[0]?.text || "" }, finish_reason: "stop" }]
+         };
+      } else if (model.startsWith('gemini')) {
+         const geminiData = await resultResponse.json();
+         let content = geminiData.candidates?.[0]?.content?.parts?.[0]?.text || "Error";
+         data = {
+            id: "gemini-" + Date.now(),
+            object: "chat.completion",
+            created: Math.floor(Date.now() / 1000),
+            model: model,
+            usage: {
+               prompt_tokens: geminiData.usageMetadata?.promptTokenCount || 0,
+               completion_tokens: geminiData.usageMetadata?.candidatesTokenCount || 0,
+               total_tokens: geminiData.usageMetadata?.totalTokenCount || 0
+            },
+            choices: [{ index: 0, message: { role: "assistant", content: content }, finish_reason: "stop" }]
+         };
+      } else {
+         data = await resultResponse.json();
+      }
+
+      const promptTokens = data.usage?.prompt_tokens || 0;
+      const completionTokens = data.usage?.completion_tokens || 0;
+      const totalTokens = data.usage?.total_tokens || 0;
+      const cost = calculateCost(model, promptTokens, completionTokens);
+
+      logRequest({ time: Date.now(), latency: Math.round(performance.now() - requestStartTime), status: 200, model: model, cache: 'MISS', team: apiKey.teamName, promptTokens, completionTokens, totalTokens, cost });
+      
+      if (latestMessage && embedding && data) {
+         saveToCache(latestMessage, embedding, model, data).catch(e => console.error("Background cache save error", e));
+      }
+      
+      res.json(data);
     }
 
   } catch (error) {
@@ -371,7 +467,51 @@ app.post('/v1/chat/completions', async (req, res) => {
   }
 });
 
-// Admin API: Metrics
+
+// Admin API: Analytics Endpoint
+app.get('/v1/admin/analytics', async (req, res) => {
+  const logs = await prisma.requestLog.findMany({
+    orderBy: { timestamp: 'asc' }
+  });
+  
+  let actualCost = 0;
+  let totalRequests = logs.length;
+  let cacheHits = 0;
+  let totalTokens = 0;
+  
+  const teamUsage: Record<string, number> = {};
+  
+  logs.forEach(log => {
+    actualCost += log.cost;
+    totalTokens += log.totalTokens;
+    if (log.cacheHit) cacheHits++;
+    
+    if (!teamUsage[log.teamName]) teamUsage[log.teamName] = 0;
+    teamUsage[log.teamName] += log.totalTokens;
+  });
+  
+  const nonCacheLogs = logs.filter(l => !l.cacheHit);
+  const avgCostPerRequest = nonCacheLogs.length > 0 ? actualCost / nonCacheLogs.length : 0.002;
+  const costSaved = cacheHits * avgCostPerRequest;
+  
+  const usageByDay: Record<string, number> = {};
+  logs.forEach(log => {
+    const day = log.timestamp.toISOString().split('T')[0];
+    if (!usageByDay[day]) usageByDay[day] = 0;
+    usageByDay[day] += log.totalTokens;
+  });
+  
+  res.json({
+    actualCost,
+    costSaved,
+    totalRequests,
+    cacheHits,
+    totalTokens,
+    teamUsage,
+    usageByDay
+  });
+});
+
 app.get('/v1/admin/metrics', (req, res) => {
   const memory = process.memoryUsage();
   res.json({
@@ -382,13 +522,11 @@ app.get('/v1/admin/metrics', (req, res) => {
   });
 });
 
-// Admin API: Get Keys
 app.get('/v1/admin/keys', async (req, res) => {
   const keys = await prisma.apiKey.findMany({ orderBy: { createdAt: 'desc' } });
   res.json(keys);
 });
 
-// Admin API: Create Key
 app.post('/v1/admin/keys', async (req, res) => {
   const { teamName, rateLimit, rateLimitWindow } = req.body;
   if (!teamName) return res.status(400).json({ error: "teamName required" });
@@ -405,7 +543,6 @@ app.post('/v1/admin/keys', async (req, res) => {
   res.json(newKey);
 });
 
-// Admin API: Get Logs
 app.get('/v1/admin/logs', async (req, res) => {
   const logs = await prisma.requestLog.findMany({ 
     orderBy: { timestamp: 'desc' },
@@ -414,7 +551,6 @@ app.get('/v1/admin/logs', async (req, res) => {
   res.json(logs);
 });
 
-// Admin API: Delete/Revoke Key
 app.delete('/v1/admin/keys/:id', async (req, res) => {
   const { id } = req.params;
   await prisma.apiKey.delete({ where: { id } });

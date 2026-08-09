@@ -1,12 +1,44 @@
-import React from 'react';
-import { DollarSign, TrendingDown, PieChart, Wallet, CreditCard } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { DollarSign, TrendingDown, PieChart, Wallet, CreditCard, Activity } from 'lucide-react';
 
 const CostAnalytics = ({ metrics }) => {
-  // Using some mock logic based on real hits for visualization
-  const averageCostPerReq = 0.002; // $0.002 per request average
-  const totalCostIfNoCache = (metrics.totalRequests * averageCostPerReq).toFixed(4);
-  const costSaved = (metrics.cacheHits * averageCostPerReq).toFixed(4);
-  const actualCost = (totalCostIfNoCache - costSaved).toFixed(4);
+  const [analytics, setAnalytics] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const fetchAnalytics = async () => {
+      try {
+        const res = await fetch('http://localhost:3000/v1/admin/analytics');
+        const data = await res.json();
+        setAnalytics(data);
+      } catch (e) {
+        console.error("Failed to fetch analytics", e);
+      } finally {
+        setLoading(false);
+      }
+    };
+    
+    // Fetch immediately and poll every 5 seconds
+    fetchAnalytics();
+    const interval = setInterval(fetchAnalytics, 5000);
+    return () => clearInterval(interval);
+  }, []);
+
+  if (loading || !analytics) {
+    return (
+      <div className="page-container fade-in" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+        <div className="loader"></div>
+      </div>
+    );
+  }
+
+  const actualCost = analytics.actualCost.toFixed(4);
+  const costSaved = analytics.costSaved.toFixed(4);
+  const totalCostIfNoCache = (analytics.actualCost + analytics.costSaved).toFixed(4);
+
+  // Generate CSS mock chart from real data
+  const days = Object.keys(analytics.usageByDay || {}).slice(-10); // last 10 days
+  const maxUsage = Math.max(...days.map(d => analytics.usageByDay[d]), 1); // Avoid div by 0
 
   return (
     <div className="page-container fade-in">
@@ -16,7 +48,6 @@ const CostAnalytics = ({ metrics }) => {
         </h2>
       </div>
 
-      {/* Top Highlight Cards */}
       <div className="stats-section glass-panel" style={{ marginTop: '0', gridTemplateColumns: 'repeat(3, 1fr)', gap: '2rem' }}>
         <div className="stat-box" style={{ textAlign: 'left', borderRight: '1px solid var(--border-color)' }}>
           <div className="stat-label" style={{ marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
@@ -40,70 +71,75 @@ const CostAnalytics = ({ metrics }) => {
         </div>
       </div>
 
-      {/* Mock Chart Area */}
       <div className="features-grid" style={{ gridTemplateColumns: '2fr 1fr', marginTop: '2rem' }}>
         
-        {/* Large Chart Area */}
         <div className="glass-panel" style={{ padding: '2rem' }}>
-          <div className="section-title" style={{ marginBottom: '2rem' }}>
-            Token Usage Over Time (Last 30 Days)
+          <div className="section-title" style={{ marginBottom: '2rem', display: 'flex', justifyContent: 'space-between' }}>
+            <span>Token Usage Over Time (Last 10 Days)</span>
+            <span style={{ fontSize: '0.9rem', color: 'var(--text-muted)' }}>{analytics.totalTokens.toLocaleString()} Total Tokens</span>
           </div>
-          {/* CSS Mock Chart */}
+          
           <div className="mock-chart">
-            <div className="chart-bar" style={{ height: '40%' }}></div>
-            <div className="chart-bar" style={{ height: '60%' }}></div>
-            <div className="chart-bar" style={{ height: '30%' }}></div>
-            <div className="chart-bar" style={{ height: '80%' }}></div>
-            <div className="chart-bar" style={{ height: '50%' }}></div>
-            <div className="chart-bar" style={{ height: '90%' }}></div>
-            <div className="chart-bar" style={{ height: '20%' }}></div>
-            <div className="chart-bar" style={{ height: '70%' }}></div>
-            <div className="chart-bar" style={{ height: '45%' }}></div>
-            <div className="chart-bar" style={{ height: '85%' }}></div>
+            {days.length === 0 ? (
+               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--text-muted)' }}>
+                 <Activity size={32} style={{ opacity: 0.5, marginRight: '1rem' }} /> No data yet
+               </div>
+            ) : (
+               days.map((day, idx) => {
+                 const height = `${Math.max((analytics.usageByDay[day] / maxUsage) * 100, 5)}%`;
+                 return (
+                   <div key={day} className="chart-bar" style={{ height }} title={`${day}: ${analytics.usageByDay[day]} tokens`}></div>
+                 );
+               })
+            )}
           </div>
           <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--text-muted)', fontSize: '0.8rem', marginTop: '1rem' }}>
-            <span>May 1</span>
-            <span>May 15</span>
-            <span>May 30</span>
+            {days.length > 0 ? (
+              <>
+                <span>{days[0]}</span>
+                <span>{days[Math.floor(days.length/2)]}</span>
+                <span>{days[days.length-1]}</span>
+              </>
+            ) : (
+              <span>Start making requests to see data</span>
+            )}
           </div>
         </div>
 
-        {/* Usage Breakdown */}
         <div className="glass-panel" style={{ padding: '2rem' }}>
           <div className="section-title" style={{ marginBottom: '2rem' }}>
             <PieChart size={20} className="logo-icon" /> Team Breakdown
           </div>
           
           <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-            <div className="breakdown-item">
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
-                <span style={{ fontWeight: 600 }}>Demo Team</span>
-                <span style={{ color: 'var(--text-muted)' }}>65%</span>
-              </div>
-              <div className="progress-bg">
-                <div className="progress-fill" style={{ width: '65%', background: 'linear-gradient(90deg, #6366f1, #a855f7)' }}></div>
-              </div>
-            </div>
-
-            <div className="breakdown-item">
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
-                <span style={{ fontWeight: 600 }}>Marketing API</span>
-                <span style={{ color: 'var(--text-muted)' }}>25%</span>
-              </div>
-              <div className="progress-bg">
-                <div className="progress-fill" style={{ width: '25%', background: 'linear-gradient(90deg, #ec4899, #f43f5e)' }}></div>
-              </div>
-            </div>
-
-            <div className="breakdown-item">
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
-                <span style={{ fontWeight: 600 }}>Support Bot</span>
-                <span style={{ color: 'var(--text-muted)' }}>10%</span>
-              </div>
-              <div className="progress-bg">
-                <div className="progress-fill" style={{ width: '10%', background: 'linear-gradient(90deg, #10b981, #3b82f6)' }}></div>
-              </div>
-            </div>
+            {Object.keys(analytics.teamUsage).length === 0 ? (
+              <div style={{ color: 'var(--text-muted)', textAlign: 'center', marginTop: '2rem' }}>No team data available</div>
+            ) : (
+              Object.entries(analytics.teamUsage)
+                .sort((a, b) => b[1] - a[1]) // Sort by usage descending
+                .map(([team, usage], idx) => {
+                  const percent = Math.round((usage / analytics.totalTokens) * 100) || 0;
+                  const colors = [
+                    'linear-gradient(90deg, #6366f1, #a855f7)',
+                    'linear-gradient(90deg, #ec4899, #f43f5e)',
+                    'linear-gradient(90deg, #10b981, #3b82f6)',
+                    'linear-gradient(90deg, #f59e0b, #ef4444)'
+                  ];
+                  const bg = colors[idx % colors.length];
+                  
+                  return (
+                    <div key={team} className="breakdown-item">
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
+                        <span style={{ fontWeight: 600 }}>{team}</span>
+                        <span style={{ color: 'var(--text-muted)' }}>{percent}%</span>
+                      </div>
+                      <div className="progress-bg">
+                        <div className="progress-fill" style={{ width: `${percent}%`, background: bg }}></div>
+                      </div>
+                    </div>
+                  );
+                })
+            )}
           </div>
         </div>
 
