@@ -53,6 +53,13 @@ const Playground = ({ model, setModel, setMetrics }) => {
       const xCache = response.headers.get('x-cache');
       if (xCache === 'HIT') cacheStatus = 'HIT';
 
+      if (!response.ok) {
+        const data = await response.json();
+        setIsLoading(false);
+        setMessages(prev => [...prev, { role: 'assistant', content: `Error: ${data.error || 'Server error'}` }]);
+        return;
+      }
+
       if (!isStreaming) {
         const data = await response.json();
         const endTime = performance.now();
@@ -142,7 +149,7 @@ const Playground = ({ model, setModel, setMetrics }) => {
               onChange={(e) => setModel(e.target.value)}
             >
               <option value="mock-test">Mock (Free Test)</option>
-              <option value="openrouter/inclusionai/ling-3.0-flash:free">OpenRouter: Ling Flash (Free)</option>
+              <option value="openrouter/nvidia/nemotron-3.5-lightning:free">OpenRouter: Nemotron Lightning (Free)</option>
               <option value="openrouter/poolside/laguna-s-2.1:free">OpenRouter: Laguna 2.1 (Free)</option>
               <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
               <option value="gpt-4o">OpenAI GPT-4o</option>

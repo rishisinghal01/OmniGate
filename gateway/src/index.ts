@@ -29,8 +29,8 @@ const PRICING_TABLE: Record<string, { prompt: number; completion: number }> = {
   'claude-3-opus-20240229': { prompt: 15.0, completion: 75.0 },
   'gemini-2.5-flash': { prompt: 0.075, completion: 0.30 },
   'mock-test': { prompt: 0, completion: 0 },
-  'openrouter/poolside/laguna-s-2.1:free': { prompt: 0, completion: 0 },
-  'openrouter/inclusionai/ling-3.0-flash:free': { prompt: 0, completion: 0 },
+  'openrouter/poolside/laguna-s-2.1:free': { prompt: 0.1, completion: 0.2 }, // Mock cost for testing dashboard
+  'openrouter/nvidia/nemotron-3.5-lightning:free': { prompt: 0.1, completion: 0.2 }, // Mock cost for testing dashboard
 };
 
 function calculateCost(model: string, promptTokens: number, completionTokens: number) {
